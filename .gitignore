@@ -1,0 +1,16 @@
+# Build artifacts
+build/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.log
+
+# Visual Studio
+.vs/
+*.vcxproj*
+*.sln
+
+# OS files
+Thumbs.db
+.DS_Store
