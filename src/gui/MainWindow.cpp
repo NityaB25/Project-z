@@ -1,13 +1,13 @@
-
-#define UNICODE
-#define _UNICODE
 #define _WIN32_WINNT 0x0601
 
 #include <windows.h>
 #include <commctrl.h>
-#include "../core/SensitiveZoneManager.h"
-#include <string>
 
+#include "../core/SensitiveZoneManager.h"
+#include "../core/ForegroundTracker.h"
+#include "../core/ActivitySessionManager.h"
+
+#include <string>
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -19,10 +19,17 @@
 #define ID_BTN_START    106
 #define ID_BTN_STOP     107
 #define ID_BTN_EXPORT   108
+#define ID_TIMER_TRACK  200
 
 HWND hListApps = nullptr;
 HWND hListStats = nullptr;
+
 SensitiveZoneManager g_zone;
+ActivitySessionManager g_session;
+
+bool g_logging = false;
+
+/* -------------------- Helper Functions -------------------- */
 
 void AddAppToListView(const std::wstring& app)
 {
@@ -32,9 +39,6 @@ void AddAppToListView(const std::wstring& app)
     item.pszText = (LPWSTR)app.c_str();
     ListView_InsertItem(hListApps, &item);
 }
-
-
-
 
 std::wstring RemoveSelectedAppFromListView()
 {
@@ -49,19 +53,65 @@ std::wstring RemoveSelectedAppFromListView()
     return buffer;
 }
 
-
-
 void LoadSensitiveAppsIntoUI()
 {
     ListView_DeleteAllItems(hListApps);
-
     for (const auto& app : g_zone.getAllApps())
-    {
         AddAppToListView(app);
+}
+
+std::wstring FormatTime(uint64_t seconds)
+{
+    uint64_t min = seconds / 60;
+    uint64_t sec = seconds % 60;
+
+    wchar_t buf[32];
+    swprintf_s(buf, L"%02llu:%02llu", min, sec);
+    return buf;
+}
+
+int FindDashboardRow(const std::wstring& app)
+{
+    int count = ListView_GetItemCount(hListStats);
+    wchar_t buf[260];
+
+    for (int i = 0; i < count; ++i)
+    {
+        ListView_GetItemText(hListStats, i, 0, buf, 260);
+        if (app == buf)
+            return i;
+    }
+    return -1;
+}
+
+void UpdateDashboard()
+{
+    const auto& stats = g_session.getStats();
+
+    for (const auto& [app, data] : stats)
+    {
+        int row = FindDashboardRow(app);
+
+        std::wstring fg = FormatTime(data.foreground);
+        std::wstring bg = FormatTime(data.background);
+        std::wstring total = FormatTime(data.foreground + data.background);
+
+        if (row == -1)
+        {
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = ListView_GetItemCount(hListStats);
+            item.pszText = (LPWSTR)app.c_str();
+            row = ListView_InsertItem(hListStats, &item);
+        }
+
+        ListView_SetItemText(hListStats, row, 1, (LPWSTR)fg.c_str());
+        ListView_SetItemText(hListStats, row, 2, (LPWSTR)bg.c_str());
+        ListView_SetItemText(hListStats, row, 3, (LPWSTR)total.c_str());
     }
 }
 
-
+/* -------------------- Window Procedure -------------------- */
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -69,151 +119,141 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
     {
-        // Label
-        CreateWindowW(
-            L"STATIC", L"Add App:",
+        CreateWindowW(L"STATIC", L"Add App:",
             WS_VISIBLE | WS_CHILD,
             10, 10, 60, 20,
-            hwnd, nullptr, nullptr, nullptr
-        );
+            hwnd, nullptr, nullptr, nullptr);
 
-        // Edit box
-        CreateWindowW(
-            L"EDIT", L"",
+        CreateWindowW(L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | WS_BORDER,
             80, 8, 180, 22,
-            hwnd, (HMENU)ID_EDIT_APP, nullptr, nullptr
-        );
+            hwnd, (HMENU)ID_EDIT_APP, nullptr, nullptr);
 
-        // Add button
-        CreateWindowW(
-            L"BUTTON", L"Add",
+        CreateWindowW(L"BUTTON", L"Add",
             WS_VISIBLE | WS_CHILD,
             270, 8, 60, 22,
-            hwnd, (HMENU)ID_BTN_ADD, nullptr, nullptr
-        );
+            hwnd, (HMENU)ID_BTN_ADD, nullptr, nullptr);
 
-        // Remove button
-        CreateWindowW(
-            L"BUTTON", L"Remove Selected",
+        CreateWindowW(L"BUTTON", L"Remove Selected",
             WS_VISIBLE | WS_CHILD,
             340, 8, 130, 22,
-            hwnd, (HMENU)ID_BTN_REMOVE, nullptr, nullptr
-        );
+            hwnd, (HMENU)ID_BTN_REMOVE, nullptr, nullptr);
 
-        // Sensitive Apps ListView
-      hListApps = CreateWindowW(
-    WC_LISTVIEWW, L"",
-    WS_VISIBLE | WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-    10, 40, 220, 150,
-    hwnd, (HMENU)ID_LIST_APPS, nullptr, nullptr
-);
-ListView_SetExtendedListViewStyle(
-    hListApps,
-    LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES
-);
+        hListApps = CreateWindowW(
+            WC_LISTVIEWW, L"",
+            WS_VISIBLE | WS_CHILD | LVS_REPORT | LVS_SINGLESEL,
+            10, 40, 220, 150,
+            hwnd, (HMENU)ID_LIST_APPS, nullptr, nullptr);
 
-        // Column for Sensitive Apps
+        ListView_SetExtendedListViewStyle(
+            hListApps, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
         LVCOLUMNW colApps{};
         colApps.mask = LVCF_TEXT | LVCF_WIDTH;
         colApps.cx = 200;
         colApps.pszText = (LPWSTR)L"Sensitive Apps";
         ListView_InsertColumn(hListApps, 0, &colApps);
 
-        // Dashboard ListView
         hListStats = CreateWindowW(
             WC_LISTVIEWW, L"",
             WS_VISIBLE | WS_CHILD | LVS_REPORT,
             240, 40, 380, 150,
-            hwnd, (HMENU)ID_LIST_STATS, nullptr, nullptr
-        );
+            hwnd, (HMENU)ID_LIST_STATS, nullptr, nullptr);
 
-        // Dashboard columns
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH;
 
-        col.cx = 100;
-        col.pszText = (LPWSTR)L"App";
+        col.cx = 100; col.pszText = (LPWSTR)L"App";
         ListView_InsertColumn(hListStats, 0, &col);
 
-        col.cx = 90;
-        col.pszText = (LPWSTR)L"Foreground";
+        col.cx = 90; col.pszText = (LPWSTR)L"Foreground";
         ListView_InsertColumn(hListStats, 1, &col);
 
-        col.cx = 90;
-        col.pszText = (LPWSTR)L"Background";
+        col.cx = 90; col.pszText = (LPWSTR)L"Background";
         ListView_InsertColumn(hListStats, 2, &col);
 
-        col.cx = 90;
-        col.pszText = (LPWSTR)L"Total";
+        col.cx = 90; col.pszText = (LPWSTR)L"Total";
         ListView_InsertColumn(hListStats, 3, &col);
 
-        // Start Logging button
-        CreateWindowW(
-            L"BUTTON", L"Start Logging",
+        CreateWindowW(L"BUTTON", L"Start Logging",
             WS_VISIBLE | WS_CHILD,
             10, 200, 120, 30,
-            hwnd, (HMENU)ID_BTN_START, nullptr, nullptr
-        );
+            hwnd, (HMENU)ID_BTN_START, nullptr, nullptr);
 
-        // Stop button
-        CreateWindowW(
-            L"BUTTON", L"Stop",
+        CreateWindowW(L"BUTTON", L"Stop",
             WS_VISIBLE | WS_CHILD,
             140, 200, 80, 30,
-            hwnd, (HMENU)ID_BTN_STOP, nullptr, nullptr
-        );
+            hwnd, (HMENU)ID_BTN_STOP, nullptr, nullptr);
 
-        // Export button
-        CreateWindowW(
-            L"BUTTON", L"Export CSV",
-            WS_VISIBLE | WS_CHILD,
-            230, 200, 120, 30,
-            hwnd, (HMENU)ID_BTN_EXPORT, nullptr, nullptr
-        );
         LoadSensitiveAppsIntoUI();
-
+        SetTimer(hwnd, ID_TIMER_TRACK, 1000, nullptr);
         break;
     }
 
-
-
-
-
- case WM_COMMAND:
-{
-    switch (LOWORD(wParam))
+    case WM_TIMER:
     {
-    case ID_BTN_ADD:
-    {
-        wchar_t buffer[260]{};
-        GetDlgItemTextW(hwnd, ID_EDIT_APP, buffer, 260);
+        if (wParam != ID_TIMER_TRACK || !g_logging)
+            break;
 
-        std::wstring app = buffer;
-        if (!app.empty() && g_zone.addApp(app))
+        std::wstring fg = GetForegroundProcessName();
+        g_session.update(fg);
+        UpdateDashboard();
+        break;
+    }
+
+    case WM_COMMAND:
+    {
+        switch (LOWORD(wParam))
         {
-            AddAppToListView(app);
-            SetDlgItemTextW(hwnd, ID_EDIT_APP, L"");
+        case ID_BTN_ADD:
+        {
+            wchar_t buffer[260]{};
+            GetDlgItemTextW(hwnd, ID_EDIT_APP, buffer, 260);
+            std::wstring app = buffer;
+
+            if (!app.empty() && g_zone.addApp(app))
+            {
+                AddAppToListView(app);
+                SetDlgItemTextW(hwnd, ID_EDIT_APP, L"");
+            }
+            break;
+        }
+
+        case ID_BTN_REMOVE:
+        {
+            std::wstring removed = RemoveSelectedAppFromListView();
+            if (!removed.empty())
+            {
+                g_zone.removeApp(removed);
+                g_session.removeApp(removed);
+
+                int row = FindDashboardRow(removed);
+                if (row != -1)
+                    ListView_DeleteItem(hListStats, row);
+            }
+            break;
+        }
+
+        case ID_BTN_START:
+        {
+            g_logging = true;
+            g_session.clear();
+            ListView_DeleteAllItems(hListStats);
+
+            for (const auto& app : g_zone.getAllApps())
+                g_session.registerApp(app);
+            break;
+        }
+
+        case ID_BTN_STOP:
+            g_logging = false;
+            break;
         }
         break;
     }
-
-    case ID_BTN_REMOVE:
-    {
-        std::wstring removed = RemoveSelectedAppFromListView();
-        if (!removed.empty())
-        {
-            g_zone.removeApp(removed);
-        }
-        break;
-    }
-
-    }
-    break;
-}
-
 
     case WM_DESTROY:
+        KillTimer(hwnd, ID_TIMER_TRACK);
         PostQuitMessage(0);
         break;
     }
@@ -221,11 +261,11 @@ ListView_SetExtendedListViewStyle(
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+/* -------------------- Entry Point -------------------- */
+
 int RunMainWindow(HINSTANCE hInstance, int nCmdShow)
 {
-    INITCOMMONCONTROLSEX icc{};
-    icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES;
+    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_LISTVIEW_CLASSES };
     InitCommonControlsEx(&icc);
 
     WNDCLASSW wc{};
@@ -242,11 +282,9 @@ int RunMainWindow(HINSTANCE hInstance, int nCmdShow)
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
         650, 300,
-        nullptr, nullptr, hInstance, nullptr
-    );
+        nullptr, nullptr, hInstance, nullptr);
 
     ShowWindow(hwnd, nCmdShow);
-    UpdateWindow(hwnd);
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0))
@@ -254,6 +292,5 @@ int RunMainWindow(HINSTANCE hInstance, int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-
     return 0;
 }
