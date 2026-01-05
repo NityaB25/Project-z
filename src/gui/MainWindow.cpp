@@ -2,6 +2,9 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include <fstream>
+
 
 #include "../core/SensitiveZoneManager.h"
 #include "../core/ForegroundTracker.h"
@@ -111,6 +114,39 @@ void UpdateDashboard()
     }
 }
 
+
+void ExportCSVFile(HWND hwnd)
+{
+    OPENFILENAMEW ofn{};
+    wchar_t fileName[MAX_PATH] = L"project_z_session.csv";
+
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFilter = L"CSV Files (*.csv)\0*.csv\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+    ofn.lpstrDefExt = L"csv";
+
+    if (!GetSaveFileNameW(&ofn))
+        return;
+
+    std::wstring csvData = g_session.exportCSV();
+
+    std::wofstream file(ofn.lpstrFile);
+    if (!file.is_open())
+    {
+        MessageBoxW(hwnd, L"Failed to save file.", L"Error", MB_ICONERROR);
+        return;
+    }
+
+    file << csvData;
+    file.close();
+
+    MessageBoxW(hwnd, L"CSV exported successfully.", L"Export", MB_OK);
+}
+
+
 /* -------------------- Window Procedure -------------------- */
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -185,6 +221,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             140, 200, 80, 30,
             hwnd, (HMENU)ID_BTN_STOP, nullptr, nullptr);
 
+        CreateWindowW(
+    L"BUTTON", L"Export CSV",
+    WS_VISIBLE | WS_CHILD,
+    230, 200, 120, 30,
+    hwnd, (HMENU)ID_BTN_EXPORT, nullptr, nullptr
+);
+
         LoadSensitiveAppsIntoUI();
         SetTimer(hwnd, ID_TIMER_TRACK, 1000, nullptr);
         break;
@@ -201,6 +244,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
     }
 
+
+   
     case WM_COMMAND:
     {
         switch (LOWORD(wParam))
@@ -218,6 +263,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             break;
         }
+         case ID_BTN_EXPORT:
+        {
+             ExportCSVFile(hwnd);
+            break;
+        }
+
 
         case ID_BTN_REMOVE:
         {

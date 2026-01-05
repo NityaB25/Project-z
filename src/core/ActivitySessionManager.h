@@ -15,6 +15,7 @@ public:
     void removeApp(const std::wstring& app);
     void clear();
 void registerApp(const std::wstring& app);
+std::wstring exportCSV() const;
 
 
     const std::unordered_map<std::wstring, AppUsageStats>& getStats() const;
