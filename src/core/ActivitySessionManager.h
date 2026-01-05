@@ -18,6 +18,13 @@ void registerApp(const std::wstring& app);
 std::wstring exportCSV() const;
 
 
+void startSession();
+void stopSession();
+
+std::wstring getSessionSummary() const;
+
+
+
     const std::unordered_map<std::wstring, AppUsageStats>& getStats() const;
 
 private:
