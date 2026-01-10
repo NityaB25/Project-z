@@ -16,6 +16,9 @@ public:
     void clear();
 void registerApp(const std::wstring& app);
 std::wstring exportCSV() const;
+void saveSessionToDisk() const;
+static std::vector<std::wstring> listSavedSessions();
+
 
 
 void startSession();

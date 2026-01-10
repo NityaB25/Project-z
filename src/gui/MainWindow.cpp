@@ -22,16 +22,17 @@
 #define ID_BTN_STOP     107
 #define ID_BTN_EXPORT   108
 #define ID_TIMER_TRACK  200
+#define ID_LIST_HISTORY 109
 
-HWND hListApps = nullptr;
-HWND hListStats = nullptr;
+HWND hListApps    = nullptr;
+HWND hListStats   = nullptr;
+HWND hListHistory = nullptr;
 
 SensitiveZoneManager g_zone;
 ActivitySessionManager g_session;
-
 bool g_logging = false;
 
-/* -------------------- Helper Functions -------------------- */
+/* ===================== Helper Functions ===================== */
 
 void AddAppToListView(const std::wstring& app)
 {
@@ -45,8 +46,7 @@ void AddAppToListView(const std::wstring& app)
 std::wstring RemoveSelectedAppFromListView()
 {
     int index = ListView_GetNextItem(hListApps, -1, LVNI_SELECTED);
-    if (index == -1)
-        return L"";
+    if (index == -1) return L"";
 
     wchar_t buffer[260]{};
     ListView_GetItemText(hListApps, index, 0, buffer, 260);
@@ -109,6 +109,23 @@ void UpdateDashboard()
     }
 }
 
+/* --------- NEW: Session History Loader --------- */
+
+void LoadSessionHistory()
+{
+    ListView_DeleteAllItems(hListHistory);
+
+    auto sessions = ActivitySessionManager::listSavedSessions();
+    for (const auto& s : sessions)
+    {
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = ListView_GetItemCount(hListHistory);
+        item.pszText = (LPWSTR)s.c_str();
+        ListView_InsertItem(hListHistory, &item);
+    }
+}
+
 void ExportCSVFile(HWND hwnd)
 {
     OPENFILENAMEW ofn{};
@@ -122,8 +139,7 @@ void ExportCSVFile(HWND hwnd)
     ofn.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
     ofn.lpstrDefExt = L"csv";
 
-    if (!GetSaveFileNameW(&ofn))
-        return;
+    if (!GetSaveFileNameW(&ofn)) return;
 
     std::wofstream file(ofn.lpstrFile);
     file << g_session.exportCSV();
@@ -132,7 +148,7 @@ void ExportCSVFile(HWND hwnd)
     MessageBoxW(hwnd, L"CSV exported successfully.", L"Export", MB_OK);
 }
 
-/* -------------------- Window Procedure -------------------- */
+/* ===================== Window Procedure ===================== */
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -156,8 +172,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             WS_VISIBLE | WS_CHILD | LVS_REPORT | LVS_SINGLESEL,
             10, 40, 220, 150, hwnd, (HMENU)ID_LIST_APPS, nullptr, nullptr);
 
-        ListView_SetExtendedListViewStyle(
-            hListApps, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+        ListView_SetExtendedListViewStyle(hListApps,
+            LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
         LVCOLUMNW colApps{ LVCF_TEXT | LVCF_WIDTH, 0, 200, (LPWSTR)L"Sensitive Apps" };
         ListView_InsertColumn(hListApps, 0, &colApps);
@@ -176,6 +192,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         col.cx = 90; col.pszText = (LPWSTR)L"Total";
         ListView_InsertColumn(hListStats, 3, &col);
 
+        /* --------- Session History UI --------- */
+        hListHistory = CreateWindowW(
+            WC_LISTVIEWW, L"",
+            WS_VISIBLE | WS_CHILD | LVS_REPORT,
+            10, 240, 610, 120,
+            hwnd, (HMENU)ID_LIST_HISTORY, nullptr, nullptr);
+
+        ListView_SetExtendedListViewStyle(
+            hListHistory, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+
+        LVCOLUMNW hist{ LVCF_TEXT | LVCF_WIDTH, 0, 580, (LPWSTR)L"Saved Sessions" };
+        ListView_InsertColumn(hListHistory, 0, &hist);
+
         CreateWindowW(L"BUTTON", L"Start Logging", WS_VISIBLE | WS_CHILD,
             10, 200, 120, 30, hwnd, (HMENU)ID_BTN_START, nullptr, nullptr);
 
@@ -185,9 +214,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         CreateWindowW(L"BUTTON", L"Export CSV", WS_VISIBLE | WS_CHILD,
             230, 200, 120, 30, hwnd, (HMENU)ID_BTN_EXPORT, nullptr, nullptr);
 
-
         g_zone.loadFromDisk();
         LoadSensitiveAppsIntoUI();
+        LoadSessionHistory();
+
         SetTimer(hwnd, ID_TIMER_TRACK, 1000, nullptr);
         break;
     }
@@ -241,6 +271,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case ID_BTN_STOP:
             g_logging = false;
             g_session.stopSession();
+            g_session.saveSessionToDisk();
+            LoadSessionHistory();
             MessageBoxW(hwnd,
                 g_session.getSessionSummary().c_str(),
                 L"Session Summary", MB_OK);
@@ -253,7 +285,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
-         g_zone.saveToDisk();
+        g_zone.saveToDisk();
         KillTimer(hwnd, ID_TIMER_TRACK);
         PostQuitMessage(0);
         break;
@@ -262,7 +294,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-/* -------------------- Entry Point -------------------- */
+/* ===================== Entry Point ===================== */
 
 int RunMainWindow(HINSTANCE hInstance, int nCmdShow)
 {
@@ -282,7 +314,7 @@ int RunMainWindow(HINSTANCE hInstance, int nCmdShow)
         L"Project Z – Sensitive App Auditor",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        650, 300,
+        650, 420,
         nullptr, nullptr, hInstance, nullptr);
 
     ShowWindow(hwnd, nCmdShow);
