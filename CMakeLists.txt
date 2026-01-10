@@ -9,7 +9,6 @@ add_executable(Z WIN32
     src/main.cpp
     src/gui/MainWindow.cpp
 
-    src/core/SensitiveZoneManager.cpp
     src/core/ForegroundTracker.cpp
     src/core/ActivitySessionManager.cpp
 )

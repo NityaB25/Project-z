@@ -1,42 +1,48 @@
 #include "ActivitySessionManager.h"
-#include "ForegroundTracker.h"
-
-#include <chrono>
+#include <windows.h>
+#include <ShlObj.h>
 #include <filesystem>
+#include <fstream>
+#include <chrono>
 #include <iomanip>
 #include <sstream>
-#include <fstream>
 
-#include <shlobj.h>
-#pragma comment(lib, "Shell32.lib")
+using namespace std;
 
-/* ---------------- Session Time Tracking ---------------- */
+/* ===================== Session Timing ===================== */
 
-static std::chrono::system_clock::time_point sessionStart;
-static std::chrono::system_clock::time_point sessionEnd;
+static chrono::system_clock::time_point g_sessionStart;
+static chrono::system_clock::time_point g_sessionEnd;
 
-/* ---------------- Helper: Session Directory ---------------- */
+/* ===================== Helpers ===================== */
 
-static std::wstring GetSessionDir()
+static wstring GetSessionsDir()
 {
-    wchar_t path[MAX_PATH]{};
+    wchar_t path[MAX_PATH];
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, path);
 
-    std::wstring dir = std::wstring(path) + L"\\ProjectZ\\sessions";
+    wstring dir = wstring(path) + L"\\ProjectZ\\sessions";
+    CreateDirectoryW((wstring(path) + L"\\ProjectZ").c_str(), nullptr);
     CreateDirectoryW(dir.c_str(), nullptr);
-
     return dir;
 }
 
-/* ---------------- Core Logic ---------------- */
+/* ===================== Core Lifecycle ===================== */
 
-void ActivitySessionManager::update(const std::wstring& foregroundApp)
+void ActivitySessionManager::startSession()
+{
+    g_sessionStart = chrono::system_clock::now();
+}
+
+void ActivitySessionManager::stopSession()
+{
+    g_sessionEnd = chrono::system_clock::now();
+}
+
+void ActivitySessionManager::update(const wstring& foregroundApp)
 {
     for (auto& [app, data] : stats)
     {
-        if (!IsProcessRunning(app))
-            continue;
-
         if (!foregroundApp.empty() && app == foregroundApp)
             data.foreground++;
         else
@@ -44,14 +50,21 @@ void ActivitySessionManager::update(const std::wstring& foregroundApp)
     }
 }
 
-void ActivitySessionManager::registerApp(const std::wstring& app)
+/* ===================== App Management ===================== */
+
+bool ActivitySessionManager::addApp(const wstring& app)
 {
-    stats[app]; // create entry if missing
+    return stats.emplace(app, AppUsageStats{}).second;
 }
 
-void ActivitySessionManager::removeApp(const std::wstring& app)
+void ActivitySessionManager::removeApp(const wstring& app)
 {
     stats.erase(app);
+}
+
+bool ActivitySessionManager::hasApp(const wstring& app) const
+{
+    return stats.find(app) != stats.end();
 }
 
 void ActivitySessionManager::clear()
@@ -59,24 +72,49 @@ void ActivitySessionManager::clear()
     stats.clear();
 }
 
-/* ---------------- Session Persistence ---------------- */
+/* ===================== Data Access ===================== */
+
+const unordered_map<wstring, AppUsageStats>&
+ActivitySessionManager::getStats() const
+{
+    return stats;
+}
+
+/* ===================== Export ===================== */
+
+wstring ActivitySessionManager::exportCSV() const
+{
+    wstring csv = L"App,Foreground(sec),Background(sec),Total(sec)\n";
+
+    for (const auto& [app, data] : stats)
+    {
+        uint64_t total = data.foreground + data.background;
+        csv += app + L"," +
+               to_wstring(data.foreground) + L"," +
+               to_wstring(data.background) + L"," +
+               to_wstring(total) + L"\n";
+    }
+    return csv;
+}
+
+/* ===================== Session Persistence ===================== */
 
 void ActivitySessionManager::saveSessionToDisk() const
 {
-    auto now = std::chrono::system_clock::now();
-    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    auto now = chrono::system_clock::now();
+    time_t t = chrono::system_clock::to_time_t(now);
 
-    std::tm tm{};
+    tm tm{};
     localtime_s(&tm, &t);
 
-    std::wstringstream name;
+    wstringstream name;
     name << L"session_"
-         << std::put_time(&tm, L"%Y-%m-%d_%H-%M-%S")
+         << put_time(&tm, L"%Y-%m-%d_%H-%M-%S")
          << L".csv";
 
-    std::wstring path = GetSessionDir() + L"\\" + name.str();
+    wstring path = GetSessionsDir() + L"\\" + name.str();
 
-    std::wofstream file(path);
+    wofstream file(path);
     if (!file.is_open())
         return;
 
@@ -84,45 +122,29 @@ void ActivitySessionManager::saveSessionToDisk() const
     file.close();
 }
 
-/* ---------------- CSV Export ---------------- */
-
-std::wstring ActivitySessionManager::exportCSV() const
+vector<wstring> ActivitySessionManager::listSavedSessions()
 {
-    std::wstring csv = L"App,Foreground(sec),Background(sec),Total(sec)\n";
+    vector<wstring> sessions;
+    wstring dir = GetSessionsDir();
 
-    for (const auto& [app, data] : stats)
+    for (const auto& entry : filesystem::directory_iterator(dir))
     {
-        uint64_t total = data.foreground + data.background;
-
-        csv += app + L"," +
-               std::to_wstring(data.foreground) + L"," +
-               std::to_wstring(data.background) + L"," +
-               std::to_wstring(total) + L"\n";
+        if (entry.path().extension() == L".csv")
+            sessions.push_back(entry.path().filename().wstring());
     }
-
-    return csv;
+    return sessions;
 }
 
-/* ---------------- Session Summary ---------------- */
+/* ===================== Summary ===================== */
 
-void ActivitySessionManager::startSession()
+wstring ActivitySessionManager::getSessionSummary() const
 {
-    sessionStart = std::chrono::system_clock::now();
-}
-
-void ActivitySessionManager::stopSession()
-{
-    sessionEnd = std::chrono::system_clock::now();
-}
-
-std::wstring ActivitySessionManager::getSessionSummary() const
-{
-    using namespace std::chrono;
+    using namespace chrono;
 
     auto duration =
-        duration_cast<seconds>(sessionEnd - sessionStart).count();
+        duration_cast<seconds>(g_sessionEnd - g_sessionStart).count();
 
-    std::wstring topApp = L"N/A";
+    wstring topApp = L"N/A";
     uint64_t maxFg = 0;
 
     for (const auto& [app, data] : stats)
@@ -134,41 +156,10 @@ std::wstring ActivitySessionManager::getSessionSummary() const
         }
     }
 
-    std::wstring summary;
-    summary += L"Session Duration: " + std::to_wstring(duration) + L" seconds\n";
-    summary += L"Apps Tracked: " + std::to_wstring(stats.size()) + L"\n";
+    wstring summary;
+    summary += L"Session Duration: " + to_wstring(duration) + L" seconds\n";
+    summary += L"Tracked Apps: " + to_wstring(stats.size()) + L"\n";
     summary += L"Top App (Foreground): " + topApp + L"\n";
 
     return summary;
-}
-
-
-std::vector<std::wstring> ActivitySessionManager::listSavedSessions()
-{
-    std::vector<std::wstring> sessions;
-
-    std::wstring dir = GetSessionDir();
-
-    if (!std::filesystem::exists(dir))
-        return sessions;
-
-    for (const auto& entry : std::filesystem::directory_iterator(dir))
-    {
-        if (entry.is_regular_file() &&
-            entry.path().extension() == L".csv")
-        {
-            sessions.push_back(entry.path().filename().wstring());
-        }
-    }
-
-    return sessions;
-}
-
-
-/* ---------------- Accessors ---------------- */
-
-const std::unordered_map<std::wstring, AppUsageStats>&
-ActivitySessionManager::getStats() const
-{
-    return stats;
 }

@@ -3,14 +3,17 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
+#include <ShlObj.h>
 #include <fstream>
 #include <string>
+#include <unordered_set>
 
-#include "../core/SensitiveZoneManager.h"
 #include "../core/ForegroundTracker.h"
 #include "../core/ActivitySessionManager.h"
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "Shell32.lib")
 
 /* ===================== Control IDs ===================== */
 
@@ -25,16 +28,18 @@
 #define ID_BTN_SMART     109
 #define ID_TIMER_TRACK   200
 #define ID_LIST_HISTORY  300
+#define ID_BTN_OPEN_DIR  301
 
 /* ===================== Globals ===================== */
 
 HWND hListApps    = nullptr;
 HWND hListStats   = nullptr;
 HWND hListHistory = nullptr;
+HWND hEditApp     = nullptr;
 HWND hBtnSmart    = nullptr;
 
-SensitiveZoneManager   g_zone;
 ActivitySessionManager g_session;
+std::unordered_set<std::wstring> g_trackedApps;
 
 bool g_logging = false;
 bool g_smart   = false;
@@ -53,42 +58,44 @@ int FindRow(HWND list, const std::wstring& text)
     int count = ListView_GetItemCount(list);
     wchar_t buf[260];
 
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; ++i)
     {
         ListView_GetItemText(list, i, 0, buf, 260);
-        if (text == buf) return i;
+        if (text == buf)
+            return i;
     }
     return -1;
 }
 
-void AddAppToList(HWND list, const std::wstring& app)
+void AddUniqueItem(HWND list, const std::wstring& text)
 {
-    if (FindRow(list, app) != -1) return;
+    if (FindRow(list, text) != -1)
+        return;
 
     LVITEMW item{};
     item.mask = LVIF_TEXT;
     item.iItem = ListView_GetItemCount(list);
-    item.pszText = (LPWSTR)app.c_str();
+    item.pszText = (LPWSTR)text.c_str();
     ListView_InsertItem(list, &item);
 }
 
-void LoadSensitiveApps()
+void RemoveItem(HWND list, const std::wstring& text)
 {
-    ListView_DeleteAllItems(hListApps);
-    for (const auto& app : g_zone.getAllApps())
-        AddAppToList(hListApps, app);
+    int row = FindRow(list, text);
+    if (row != -1)
+        ListView_DeleteItem(list, row);
 }
+
+/* ===================== Dashboard ===================== */
 
 void UpdateDashboard()
 {
     for (const auto& [app, data] : g_session.getStats())
     {
-        // 🔒 HARD FILTER
-        if (!g_zone.isSensitive(app))
+        if (g_trackedApps.find(app) == g_trackedApps.end())
             continue;
 
         int row = FindRow(hListStats, app);
-
         if (row == -1)
         {
             LVITEMW item{};
@@ -107,31 +114,43 @@ void UpdateDashboard()
     }
 }
 
+/* ===================== Session History ===================== */
+
 void LoadSessionHistory()
 {
     ListView_DeleteAllItems(hListHistory);
     for (const auto& s : ActivitySessionManager::listSavedSessions())
-        AddAppToList(hListHistory, s);
+        AddUniqueItem(hListHistory, s);
+}
+
+void OpenSessionsFolder()
+{
+    wchar_t path[MAX_PATH];
+    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, path);
+
+    std::wstring dir = std::wstring(path) + L"\\ProjectZ\\sessions";
+    ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOW);
 }
 
 void ExportCSVFile(HWND hwnd)
 {
     OPENFILENAMEW ofn{};
-    wchar_t path[MAX_PATH] = L"session.csv";
+    wchar_t file[MAX_PATH] = L"session.csv";
 
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
     ofn.lpstrFilter = L"CSV Files (*.csv)\0*.csv\0";
-    ofn.lpstrFile = path;
+    ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_EXPLORER | OFN_OVERWRITEPROMPT;
     ofn.lpstrDefExt = L"csv";
 
-    if (!GetSaveFileNameW(&ofn)) return;
+    if (!GetSaveFileNameW(&ofn))
+        return;
 
-    std::wofstream file(path);
-    file << g_session.exportCSV();
-    file.close();
+    std::wofstream out(file);
+    out << g_session.exportCSV();
+    out.close();
 
     MessageBoxW(hwnd, L"CSV exported successfully.", L"Export", MB_OK);
 }
@@ -144,54 +163,77 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
     {
-        CreateWindowW(L"STATIC", L"Add App:", WS_CHILD | WS_VISIBLE,
-            10, 10, 70, 20, hwnd, nullptr, nullptr, nullptr);
+        CreateWindowW(L"STATIC", L"Add App:",
+            WS_CHILD | WS_VISIBLE, 10, 10, 60, 20,
+            hwnd, nullptr, nullptr, nullptr);
 
-        CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER,
-            90, 8, 180, 22, hwnd, (HMENU)ID_EDIT_APP, nullptr, nullptr);
+        hEditApp = CreateWindowW(L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER,
+            80, 8, 180, 22,
+            hwnd, (HMENU)ID_EDIT_APP, nullptr, nullptr);
 
-        CreateWindowW(L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE,
-            280, 8, 60, 22, hwnd, (HMENU)ID_BTN_ADD, nullptr, nullptr);
+        CreateWindowW(L"BUTTON", L"Add",
+            WS_CHILD | WS_VISIBLE,
+            270, 8, 60, 22,
+            hwnd, (HMENU)ID_BTN_ADD, nullptr, nullptr);
 
-        CreateWindowW(L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE,
-            350, 8, 80, 22, hwnd, (HMENU)ID_BTN_REMOVE, nullptr, nullptr);
+        CreateWindowW(L"BUTTON", L"Remove",
+            WS_CHILD | WS_VISIBLE,
+            340, 8, 80, 22,
+            hwnd, (HMENU)ID_BTN_REMOVE, nullptr, nullptr);
 
         hBtnSmart = CreateWindowW(L"BUTTON", L"Smart Monitor: OFF",
             WS_CHILD | WS_VISIBLE,
-            440, 8, 170, 22, hwnd, (HMENU)ID_BTN_SMART, nullptr, nullptr);
+            430, 8, 180, 22,
+            hwnd, (HMENU)ID_BTN_SMART, nullptr, nullptr);
 
         hListApps = CreateWindowW(WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-            10, 40, 220, 150, hwnd, (HMENU)ID_LIST_APPS, nullptr, nullptr);
+            10, 40, 220, 150,
+            hwnd, (HMENU)ID_LIST_APPS, nullptr, nullptr);
 
         hListStats = CreateWindowW(WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | LVS_REPORT,
-            240, 40, 380, 150, hwnd, (HMENU)ID_LIST_STATS, nullptr, nullptr);
+            240, 40, 380, 150,
+            hwnd, (HMENU)ID_LIST_STATS, nullptr, nullptr);
 
         hListHistory = CreateWindowW(WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | LVS_REPORT,
-            10, 230, 610, 120, hwnd, (HMENU)ID_LIST_HISTORY, nullptr, nullptr);
+            10, 230, 610, 120,
+            hwnd, (HMENU)ID_LIST_HISTORY, nullptr, nullptr);
 
-        ListView_InsertColumn(hListApps, 0, &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 200, (LPWSTR)L"Sensitive Apps" }));
-        ListView_InsertColumn(hListStats, 0, &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 100, (LPWSTR)L"App" }));
-        ListView_InsertColumn(hListStats, 1, &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 90, (LPWSTR)L"Foreground" }));
-        ListView_InsertColumn(hListStats, 2, &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 90, (LPWSTR)L"Background" }));
-        ListView_InsertColumn(hListStats, 3, &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 90, (LPWSTR)L"Total" }));
-        ListView_InsertColumn(hListHistory, 0, &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 580, (LPWSTR)L"Saved Sessions" }));
+        ListView_InsertColumn(hListApps, 0,
+            &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 200, (LPWSTR)L"Tracked Apps" }));
 
-        CreateWindowW(L"BUTTON", L"Start", WS_CHILD | WS_VISIBLE,
-            10, 200, 80, 26, hwnd, (HMENU)ID_BTN_START, nullptr, nullptr);
+        ListView_InsertColumn(hListStats, 0,
+            &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 120, (LPWSTR)L"App" }));
+        ListView_InsertColumn(hListStats, 1,
+            &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 90, (LPWSTR)L"Foreground" }));
+        ListView_InsertColumn(hListStats, 2,
+            &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 90, (LPWSTR)L"Background" }));
+        ListView_InsertColumn(hListStats, 3,
+            &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 90, (LPWSTR)L"Total" }));
 
-        CreateWindowW(L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE,
-            100, 200, 80, 26, hwnd, (HMENU)ID_BTN_STOP, nullptr, nullptr);
+        ListView_InsertColumn(hListHistory, 0,
+            &(LVCOLUMNW{ LVCF_TEXT | LVCF_WIDTH, 0, 580, (LPWSTR)L"Saved Sessions" }));
 
-        CreateWindowW(L"BUTTON", L"Export CSV", WS_CHILD | WS_VISIBLE,
-            190, 200, 120, 26, hwnd, (HMENU)ID_BTN_EXPORT, nullptr, nullptr);
+        CreateWindowW(L"BUTTON", L"Start",
+            WS_CHILD | WS_VISIBLE, 10, 200, 80, 26,
+            hwnd, (HMENU)ID_BTN_START, nullptr, nullptr);
 
-        g_zone.loadFromDisk();
-        LoadSensitiveApps();
+        CreateWindowW(L"BUTTON", L"Stop",
+            WS_CHILD | WS_VISIBLE, 100, 200, 80, 26,
+            hwnd, (HMENU)ID_BTN_STOP, nullptr, nullptr);
+
+        CreateWindowW(L"BUTTON", L"Export CSV",
+            WS_CHILD | WS_VISIBLE, 190, 200, 120, 26,
+            hwnd, (HMENU)ID_BTN_EXPORT, nullptr, nullptr);
+
+        CreateWindowW(L"BUTTON", L"Open Sessions Folder",
+            WS_CHILD | WS_VISIBLE, 320, 200, 200, 26,
+            hwnd, (HMENU)ID_BTN_OPEN_DIR, nullptr, nullptr);
+
         LoadSessionHistory();
-
         SetTimer(hwnd, ID_TIMER_TRACK, 1000, nullptr);
         break;
     }
@@ -201,12 +243,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             std::wstring fg = GetForegroundProcessName();
 
-            if (g_smart && !fg.empty() && !g_zone.isSensitive(fg) &&
-                fg != L"explorer.exe")
+            if (g_smart && !fg.empty() && g_trackedApps.insert(fg).second)
             {
-                g_zone.addApp(fg);
-                g_session.registerApp(fg);
-                AddAppToList(hListApps, fg);
+                g_session.addApp(fg);
+                AddUniqueItem(hListApps, fg);
             }
 
             g_session.update(fg);
@@ -223,11 +263,42 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_smart ? L"Smart Monitor: ON" : L"Smart Monitor: OFF");
             break;
 
+        case ID_BTN_ADD:
+        {
+            wchar_t buf[260]{};
+            GetDlgItemTextW(hwnd, ID_EDIT_APP, buf, 260);
+            std::wstring app = buf;
+
+            if (!app.empty() && g_trackedApps.insert(app).second)
+            {
+                g_session.addApp(app);
+                AddUniqueItem(hListApps, app);
+            }
+            break;
+        }
+
+        case ID_BTN_REMOVE:
+        {
+            int index = ListView_GetNextItem(hListApps, -1, LVNI_SELECTED);
+            if (index == -1) break;
+
+            wchar_t buf[260]{};
+            ListView_GetItemText(hListApps, index, 0, buf, 260);
+            std::wstring app = buf;
+
+            g_trackedApps.erase(app);
+            g_session.removeApp(app);
+
+            ListView_DeleteItem(hListApps, index);
+            RemoveItem(hListStats, app);
+            break;
+        }
+
         case ID_BTN_START:
             g_logging = true;
             g_session.clear();
-            for (const auto& app : g_zone.getAllApps())
-                g_session.registerApp(app);
+            for (const auto& app : g_trackedApps)
+                g_session.addApp(app);
             break;
 
         case ID_BTN_STOP:
@@ -243,38 +314,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ExportCSVFile(hwnd);
             break;
 
-
-                case ID_BTN_REMOVE:
-{
-    int index = ListView_GetNextItem(hListApps, -1, LVNI_SELECTED);
-    if (index == -1) break;
-
-    wchar_t buf[260]{};
-    ListView_GetItemText(hListApps, index, 0, buf, 260);
-    std::wstring app = buf;
-
-    // 1. Remove from Sensitive Zone
-    g_zone.removeApp(app);
-
-    // 2. Remove from active session tracking
-    g_session.removeApp(app);
-
-    // 3. Remove from Sensitive Apps UI
-    ListView_DeleteItem(hListApps, index);
-
-    // 4. Remove from Dashboard UI
-    int row = FindRow(hListStats, app);
-    if (row != -1)
-        ListView_DeleteItem(hListStats, row);
-
-    break;
-}
-
+        case ID_BTN_OPEN_DIR:
+            OpenSessionsFolder();
+            break;
         }
         break;
 
     case WM_DESTROY:
-        g_zone.saveToDisk();
         KillTimer(hwnd, ID_TIMER_TRACK);
         PostQuitMessage(0);
         break;
@@ -299,10 +345,10 @@ int RunMainWindow(HINSTANCE hInstance, int nCmdShow)
 
     HWND hwnd = CreateWindowW(
         wc.lpszClassName,
-        L"Project Z – Sensitive App Auditor",
+        L"Project Z – App Usage Monitor",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        800, 500,
+        820, 520,
         nullptr, nullptr, hInstance, nullptr);
 
     ShowWindow(hwnd, nCmdShow);
