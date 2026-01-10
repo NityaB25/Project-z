@@ -185,6 +185,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         CreateWindowW(L"BUTTON", L"Export CSV", WS_VISIBLE | WS_CHILD,
             230, 200, 120, 30, hwnd, (HMENU)ID_BTN_EXPORT, nullptr, nullptr);
 
+
+        g_zone.loadFromDisk();
         LoadSensitiveAppsIntoUI();
         SetTimer(hwnd, ID_TIMER_TRACK, 1000, nullptr);
         break;
@@ -251,6 +253,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_DESTROY:
+         g_zone.saveToDisk();
         KillTimer(hwnd, ID_TIMER_TRACK);
         PostQuitMessage(0);
         break;

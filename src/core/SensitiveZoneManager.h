@@ -12,6 +12,9 @@ public:
     bool isSensitive(const std::wstring& app) const;
     void listApps() const;
     const std::unordered_set<std::wstring>& getAllApps() const;
+    void loadFromDisk();
+void saveToDisk() const;
+
 
 
     void loadFromFile();

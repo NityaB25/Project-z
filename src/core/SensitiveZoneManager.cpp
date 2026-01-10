@@ -3,8 +3,56 @@
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
+#include <shlobj.h> 
+
+
+static std::wstring GetConfigPath()
+{
+    wchar_t path[MAX_PATH];
+    SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, path);
+
+    std::wstring dir = std::wstring(path) + L"\\ProjectZ";
+    CreateDirectoryW(dir.c_str(), nullptr);
+
+    return dir + L"\\config.txt";
+}
+
+void SensitiveZoneManager::loadFromDisk()
+{
+    sensitiveApps.clear();
+
+    std::wifstream file(GetConfigPath());
+    if (!file.is_open())
+        return;
+
+    std::wstring line;
+    while (std::getline(file, line))
+    {
+        if (!line.empty())
+            sensitiveApps.insert(line);
+    }
+}
+
+void SensitiveZoneManager::saveToDisk() const
+{
+    std::wofstream file(GetConfigPath(), std::ios::trunc);
+    if (!file.is_open())
+        return;
+
+    for (const auto& app : sensitiveApps)
+        file << app << L"\n";
+}
+
+
+
+
 
 static const std::wstring CONFIG_PATH = L"config/sensitive_apps.txt";
+
+
+
+
+
 
 SensitiveZoneManager::SensitiveZoneManager()
 {
